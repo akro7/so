@@ -1,0 +1,113 @@
+name: Decompile .SO Files
+
+on:
+  push:
+    paths:
+      - '**.so'
+  workflow_dispatch:
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Download Ghidra
+      run: |
+        wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip -O ghidra.zip
+        unzip -q ghidra.zip
+        mv ghidra_11.0.3_PUBLIC ghidra
+        chmod +x ghidra/support/analyzeHeadless
+
+    - name: Create Decompiler Script
+      run: |
+        mkdir -p ghidra/Ghidra/Features/Base/ghidra_scripts
+        cat << 'EOF' > ghidra/Ghidra/Features/Base/ghidra_scripts/CustomDecompiler.java
+        import ghidra.app.script.GhidraScript;
+        import ghidra.app.decompiler.DecompInterface;
+        import ghidra.app.decompiler.DecompileResults;
+        import ghidra.program.model.listing.Function;
+        import ghidra.program.model.listing.FunctionIterator;
+        import java.io.PrintWriter;
+        import java.io.FileWriter;
+
+        public class CustomDecompiler extends GhidraScript {
+            @Override
+            public void run() throws Exception {
+                String[] args = getScriptArgs();
+                if (args.length == 0) return;
+                String outputFile = args[0];
+
+                DecompInterface decompInterface = new DecompInterface();
+                decompInterface.openProgram(currentProgram);
+
+                PrintWriter writer = new PrintWriter(new FileWriter(outputFile));
+                writer.println("// Decompiled: " + currentProgram.getName());
+                writer.println("// Arch: " + currentProgram.getLanguage().getProcessor());
+                writer.println();
+
+                FunctionIterator functions = currentProgram.getListing().getFunctions(true);
+                while (functions.hasNext() && !monitor.isCancelled()) {
+                    Function f = functions.next();
+                    if (f.isThunk()) continue;
+                    DecompileResults results = decompInterface.decompileFunction(f, 60, monitor);
+                    if (results != null && results.getDecompiledFunction() != null) {
+                        writer.println(results.getDecompiledFunction().getC());
+                        writer.println("// ================================================");
+                    }
+                }
+                writer.close();
+                decompInterface.dispose();
+            }
+        }
+        EOF
+
+    - name: Decompile
+      run: |
+        mkdir -p App_Source_Code
+
+        shopt -s nullglob
+        COUNTER=0
+
+        for file in *.so; do
+          [ -f "$file" ] || continue
+          COUNTER=$((COUNTER+1))
+          filename=$(basename "$file")
+          name="${filename%.so}"
+
+          echo ">>> Processing: $filename"
+          echo ">>> Size: $(du -sh "$file" | cut -f1)"
+          echo ">>> Magic: $(xxd -p -l 4 "$file")"
+
+          mkdir -p "App_Source_Code/$name"
+
+          ./ghidra/support/analyzeHeadless \
+            /tmp "proj${COUNTER}" \
+            -import "$(pwd)/$file" \
+            -scriptPath "$(pwd)/ghidra/Ghidra/Features/Base/ghidra_scripts" \
+            -postScript CustomDecompiler.java \
+              "$(pwd)/App_Source_Code/$name/${name}.c" \
+            -deleteProject 2>&1
+
+          echo ">>> Done: $filename"
+        done
+
+    - name: Check Output
+      run: |
+        find App_Source_Code -type f
+        du -sh App_Source_Code/
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: Decompiled-Source
+        path: App_Source_Code/
+        if-no-files-found: warn

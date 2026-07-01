@@ -100,8 +100,12 @@ jobs:
     - name: Install RetDec
       run: |
         wget -q https://github.com/avast/retdec/releases/download/v5.0/RetDec-v5.0-Linux-Release.tar.xz -O retdec.tar.xz
-        tar -xf retdec.tar.xz
-        mv RetDec-v5.0-Linux-Release retdec || mv retdec-* retdec
+        # sanity check: make sure we actually got a valid xz archive and not an HTML error page
+        file retdec.tar.xz
+        mkdir -p retdec
+        # --strip-components=1 extracts directly into ./retdec regardless of the
+        # top-level folder name inside the archive (avoids guessing/mv failures)
+        tar -xf retdec.tar.xz -C retdec --strip-components=1
         chmod +x retdec/bin/retdec-decompiler
 
     # ---------- Run all three decompilers ----------

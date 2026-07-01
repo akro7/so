@@ -91,8 +91,10 @@ jobs:
 
         pkg-config --modversion r_core   # sanity check, should print a version
 
-        r2pm init
-        r2pm -ci r2ghidra
+        # NOTE: this build of r2pm does not support "init" or "-ci" as flags.
+        # Valid flags are: -U (update package db) then -i <pkg> (install).
+        r2pm -U
+        r2pm -i r2ghidra
 
     # ---------- RetDec ----------
     - name: Install RetDec

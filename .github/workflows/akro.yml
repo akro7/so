@@ -1,4 +1,4 @@
-name: Decompile .SO Files
+name: Decompile .SO Files (Multi-Tool)
 
 on:
   push:
@@ -20,6 +20,7 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
+    # ---------- Ghidra ----------
     - name: Download Ghidra
       run: |
         wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip -O ghidra.zip
@@ -27,7 +28,7 @@ jobs:
         mv ghidra_11.0.3_PUBLIC ghidra
         chmod +x ghidra/support/analyzeHeadless
 
-    - name: Create Decompiler Script
+    - name: Create Ghidra Decompiler Script
       run: |
         mkdir -p ghidra/Ghidra/Features/Base/ghidra_scripts
         cat << 'EOF' > ghidra/Ghidra/Features/Base/ghidra_scripts/CustomDecompiler.java
@@ -70,10 +71,26 @@ jobs:
         }
         EOF
 
-    - name: Decompile
+    # ---------- radare2 + r2ghidra ----------
+    - name: Install radare2 and r2ghidra
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y radare2
+        r2pm init
+        r2pm -ci r2ghidra || r2pm -ci r2ghidra   # retry once, network hiccups happen
+
+    # ---------- RetDec ----------
+    - name: Install RetDec
+      run: |
+        wget -q https://github.com/avast/retdec/releases/download/v5.0/RetDec-v5.0-Linux-Release.tar.xz -O retdec.tar.xz
+        tar -xf retdec.tar.xz
+        mv RetDec-v5.0-Linux-Release retdec || mv retdec-* retdec
+        chmod +x retdec/bin/retdec-decompiler
+
+    # ---------- Run all three decompilers ----------
+    - name: Decompile with all tools
       run: |
         mkdir -p App_Source_Code
-
         shopt -s nullglob
         COUNTER=0
 
@@ -82,20 +99,57 @@ jobs:
           COUNTER=$((COUNTER+1))
           filename=$(basename "$file")
           name="${filename%.so}"
+          outdir="App_Source_Code/$name"
+          mkdir -p "$outdir"
 
+          echo "=================================================="
           echo ">>> Processing: $filename"
           echo ">>> Size: $(du -sh "$file" | cut -f1)"
-          echo ">>> Magic: $(xxd -p -l 4 "$file")"
+          echo "=================================================="
 
-          mkdir -p "App_Source_Code/$name"
-
+          # --- 1) Ghidra ---
+          echo ">>> [1/3] Ghidra decompiling..."
           ./ghidra/support/analyzeHeadless \
-            /tmp "proj${COUNTER}" \
+            /tmp "proj${COUNTER}_ghidra" \
             -import "$(pwd)/$file" \
             -scriptPath "$(pwd)/ghidra/Ghidra/Features/Base/ghidra_scripts" \
             -postScript CustomDecompiler.java \
-              "$(pwd)/App_Source_Code/$name/${name}.c" \
-            -deleteProject 2>&1
+              "$(pwd)/$outdir/${name}_ghidra.c" \
+            -deleteProject > "$outdir/ghidra.log" 2>&1 || echo ">>> Ghidra failed on $filename"
+
+          # --- 2) radare2 / r2ghidra ---
+          echo ">>> [2/3] r2ghidra decompiling..."
+          {
+            echo "// Decompiled: $filename"
+            echo "// Tool: radare2 + r2ghidra"
+            echo
+            timeout 1800 r2 -q -e scr.color=0 -e scr.interactive=false \
+              -c 'aaa; pdg @@f' "$(pwd)/$file"
+          } > "$outdir/${name}_r2ghidra.c" 2>"$outdir/r2ghidra.log" || echo ">>> r2ghidra failed on $filename"
+
+          # --- 3) RetDec ---
+          echo ">>> [3/3] RetDec decompiling..."
+          timeout 1800 ./retdec/bin/retdec-decompiler "$(pwd)/$file" \
+            -o "$(pwd)/$outdir/${name}_retdec.c" > "$outdir/retdec.log" 2>&1 \
+            || echo ">>> RetDec failed on $filename"
+
+          # --- Combined comparison file ---
+          combined="$outdir/${name}_COMBINED.c"
+          {
+            echo "// ================================================"
+            echo "// COMBINED DECOMPILATION: $filename"
+            echo "// Tools: Ghidra | radare2+r2ghidra | RetDec"
+            echo "// ================================================"
+            echo
+            echo "// ---------- [GHIDRA OUTPUT] ----------"
+            [ -f "$outdir/${name}_ghidra.c" ] && cat "$outdir/${name}_ghidra.c" || echo "// (no output)"
+            echo
+            echo "// ---------- [R2GHIDRA OUTPUT] ----------"
+            [ -f "$outdir/${name}_r2ghidra.c" ] && cat "$outdir/${name}_r2ghidra.c" || echo "// (no output)"
+            echo
+            echo "// ---------- [RETDEC OUTPUT] ----------"
+            [ -f "$outdir/${name}_retdec.c" ] && cat "$outdir/${name}_retdec.c" || echo "// (no output)"
+          } > "$combined"
 
           echo ">>> Done: $filename"
         done

@@ -71,13 +71,28 @@ jobs:
         }
         EOF
 
-    # ---------- radare2 + r2ghidra ----------
-    - name: Install radare2 and r2ghidra
+    # ---------- radare2 (from source) + r2ghidra ----------
+    - name: Install radare2 (from source) and r2ghidra
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y radare2
+        sudo apt-get install -y build-essential pkg-config git meson ninja-build
+
+        # remove any apt-installed radare2 to avoid version/pkgconfig conflicts
+        sudo apt-get remove -y radare2 || true
+
+        git clone --depth 1 https://github.com/radareorg/radare2.git
+        cd radare2
+        sys/install.sh --install
+        cd ..
+
+        # make sure the freshly installed r_core.pc is visible to pkg-config
+        export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+        pkg-config --modversion r_core   # sanity check, should print a version
+
         r2pm init
-        r2pm -ci r2ghidra || r2pm -ci r2ghidra   # retry once, network hiccups happen
+        r2pm -ci r2ghidra
 
     # ---------- RetDec ----------
     - name: Install RetDec
@@ -90,6 +105,7 @@ jobs:
     # ---------- Run all three decompilers ----------
     - name: Decompile with all tools
       run: |
+        export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
         mkdir -p App_Source_Code
         shopt -s nullglob
         COUNTER=0
